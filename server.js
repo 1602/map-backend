@@ -27,10 +27,15 @@ var exists = fs.existsSync(dbFile);
 var sqlite3 = require('sqlite3').verbose();
 var db = new sqlite3.Database(dbFile);
 
+fs.createReadStream('./.data/sqlite.db').pipe(fs.createWriteStream('./public/backup.db'));
+
+
+
 // if ./.data/sqlite.db does not exist, create it, otherwise print records to console
 db.serialize(function(){
-  
   if (!exists) {
+    
+
     db.run('CREATE TABLE Squares (lat REAL, long REAL, visits INTEGER, PRIMARY KEY (lat, long))');
     db.run('CREATE TABLE Coordinates (lat REAL, long REAL, alt REAL, time INTEGER)');
     db.run('CREATE INDEX ixTime ON Coordinates (time)');
@@ -54,7 +59,11 @@ db.serialize(function(){
         console.log('record:', row);
       }
     });
-    
+
+    db.each('SELECT lat, long from Coordinates ORDER BY time DESC LIMIT 1', function(err, row) {
+      console.log('last coordinate', row);
+    });
+
     db.each('SELECT count(*) as pointsToday from Coordinates where time > ?', (new Date()).setHours(0,0,0,0), function(err, row) {
       if (row) {
         prevLat = row.lat;
@@ -66,10 +75,11 @@ db.serialize(function(){
 });
 
 let prevLat = null, prevLong = null, lastLocation;
+const n = 2000;
+
 
 app.post('/squares', function(req, res) {
   console.log(req.body);
-  const n = 2000;
   
   
   if (req.body.forEach) {
@@ -94,27 +104,62 @@ app.post('/squares', function(req, res) {
   res.send('OK');
 });
 
+function zoom(factor) {
+  return function(record) {
+    return record;
+    return {
+      ...record,
+      lat: Math.floor(record.lat * (n / factor)) / (n / factor),
+      long: Math.floor(record.long * (n / factor)) / (n / factor)
+    };
+  };
+}
+
+app.get('/path', (req, res) => {
+  const d1 = (new Date(req.query.time ? parseInt(req.query.time, 10) : Date.now())).setHours(0,0,0,0);
+  const d2 = d1 + 86400000;
+  db.all('SELECT * from Coordinates where time between ? and ?', d1, d2, function(err, rows) {
+    res.send(JSON.stringify(rows));
+  });
+});
 
 app.get('/squares', function(request, response) {
-  const delta = 0.003 * parseFloat(request.query.zoom);
+  const delta = 0.006 * parseFloat(request.query.zoom);
   db.each('SELECT lat, long from Coordinates ORDER BY time DESC LIMIT 1', function(err, row) {
     if ( row ) {
       prevLat = parseFloat(request.query.lat || row.lat);
       prevLong = parseFloat(request.query.long || row.long);
       lastLocation = { lat: row.lat, long: row.long, visits: 1 };
 
-      db.all('SELECT * from Squares WHERE (lat BETWEEN ? AND ?) AND (long BETWEEN ? AND ?)', prevLat - delta, prevLat + delta, prevLong - delta, prevLong + delta, function(err, rows) {
+      db.all('SELECT * from Squares2 WHERE (lat BETWEEN ? AND ?) AND (long BETWEEN ? AND ?)', prevLat - delta * 2, prevLat + delta * 2, prevLong - delta, prevLong + delta, function(err, rows) {
 
         if (lastLocation) {
           rows.unshift(lastLocation);
           
         }
-        response.send(JSON.stringify(rows));
+        response.send(JSON.stringify(rows.map(zoom(parseFloat(request.query.zoom / 4)))));
       });
     }
   });
   
 });
+
+const { ratio } = require('./long.js');
+
+function migrate() {
+  db.each('SELECT lat, long from Coordinates ORDER BY time ASC', function(err, chunk) {
+      const r = ratio(chunk.lat, chunk.long);
+      const lat = Math.floor(r * chunk.lat * n) / n;
+      const long = Math.floor(chunk.long * n) / n;
+  
+      if (prevLat !== lat || prevLong !== long) {
+        console.log('visited', lat, long, chunk);
+        db.run('INSERT OR REPLACE INTO Squares2 (lat, long, visits) VALUES (?, ?, 1 + COALESCE((SELECT visits FROM Squares WHERE lat = ? and long = ?), 0))', lat, long, lat, long);
+      }
+      prevLat = lat;
+      prevLong = long;
+    });
+}
 
 // listen for requests :)
 var listener = app.listen(process.env.PORT, function () {
