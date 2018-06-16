@@ -1,0 +1,7 @@
+{ "extends": "1602"
+, "env": { "node": true }
+, "parserOptions":
+  { "ecmaVersion": 2018
+  , "ecmaFeatures": { "spread": true }
+  }
+}
