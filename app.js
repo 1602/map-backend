@@ -95,11 +95,10 @@ async function coordinatesForDay(timestamp) {
 
 
 async function getSquares(zoom, lat, long) {
-    const delta = 0.006 * zoom;
+    const delta = 0.007 * zoom;
 
     let prevLat, prevLong;
     const lastLocation = await getLastLocation();
-    console.log(lastLocation);
 
     if (lat) {
         [prevLat, prevLong] = skewAndRound({ lat: parseFloat(lat), long: parseFloat(long) });
@@ -118,7 +117,7 @@ async function getSquares(zoom, lat, long) {
 
     rows.unshift({ ...skew(lastLocation), visits: 1 });
 
-    return rows;
+    return rows.map(x => [x.lat, x.long, x.visits]);
 }
 
 
