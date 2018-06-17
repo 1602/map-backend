@@ -46,7 +46,7 @@ async function logCoordinates(coordinates) {
 
 
 async function getLastLocation() {
-    const rows = await db.all('SELECT lat, long from Coordinates ORDER BY time DESC LIMIT 1');
+    const rows = await db.all('SELECT lat, long, time from Coordinates ORDER BY time DESC LIMIT 1');
     return rows[0];
 }
 
@@ -63,6 +63,7 @@ function skewAndRound(point) {
 }
 
 
+/*
 function skew(point) {
     if (!point) {
         return { lat: 0, long: 0 };
@@ -72,6 +73,7 @@ function skew(point) {
 
     return { lat: ratio(lat) * lat, long };
 }
+*/
 
 
 async function coordinatesForDay(timestamp) {
@@ -115,9 +117,37 @@ async function getSquares(zoom, lat, long) {
     prevLong + delta
     );
 
-    rows.unshift({ ...skew(lastLocation), visits: 1 });
+    const squares = {};
+    rows.forEach(row => calcSquareCoordinate(row, 200));
 
-    return rows.map(x => [x.lat, x.long, x.visits]);
+    return {
+        squares:
+            Object
+                .keys(squares)
+                .map(key =>
+                    key.split(',').map(n => parseInt(n, 10)).concat(
+                        squares[key].map(arr => arr.reduce((a, n) => (a << 3) + n, 0))
+                    )
+                ),
+        lastLocation,
+        ratio: ratio(lastLocation.lat),
+    };
+
+    function calcSquareCoordinate({ lat, long, visits }, squareSize) {
+        const a0 = Math.floor(lat * squareSize);
+        const b0 = Math.floor(long * squareSize);
+        const a = Math.floor(lat * squareSize * 10);
+        const b = Math.floor(long * squareSize * 10);
+        const offsetA = a - a0 * 10;
+        const offsetB = b - b0 * 10;
+        const squareId = a0 + ',' + b0;
+
+        if (!(squares[squareId])) {
+            squares[squareId] = (new Array(10)).fill(0).map(() => [0,0,0,0,0,0,0,0,0,0]);
+        }
+
+        squares[squareId][offsetB][offsetA] = visits;
+    }
 }
 
 
