@@ -7,7 +7,8 @@ const { ratio } = require('./long.js');
 module.exports = {
     logCoordinates,
     coordinatesForDay,
-    getSquares,
+    getSquaresFromRawData,
+    getSquaresFromAggregate,
     deleteSquare,
     deleteCoordinate
 };
@@ -17,15 +18,17 @@ async function logCoordinates(coordinates) {
     const highAccuracyCoordinates = coordinates.filter(point => point.acc < 50);
     let [prevLat, prevLong] = skewAndRound(await getLastLocation() || highAccuracyCoordinates[0]);
 
-    for (let i = 0; i < highAccuracyCoordinates.length; i += 1) {
-        await logCoordinate(highAccuracyCoordinates[i]);
-    }
+    db.serialize(() => {
+        for (let i = 0; i < highAccuracyCoordinates.length; i += 1) {
+            logCoordinate(highAccuracyCoordinates[i]);
+        }
+    });
 
-    async function logCoordinate(point) {
+    function logCoordinate(point) {
         const [lat, long] = skewAndRound(point);
 
         if (prevLat !== lat || prevLong !== long) {
-            await db.run(`
+            db.run(`
                 INSERT OR REPLACE INTO Squares (lat, long, visits)
                 VALUES (
                     ?,
@@ -34,7 +37,7 @@ async function logCoordinates(coordinates) {
                 )`, lat, long, lat, long);
         }
 
-        await db.run(`
+        db.run(`
             INSERT INTO Coordinates (lat, long, alt, time)
             VALUES (?, ?, ?, ?)
             `, point.lat, point.long, point.alt, point.time);
@@ -46,7 +49,7 @@ async function logCoordinates(coordinates) {
 
 
 async function getLastLocation() {
-    const rows = await db.all('SELECT lat, long, time from Coordinates ORDER BY time DESC LIMIT 1');
+    const rows = await db.all('SELECT lat, long, time FROM Coordinates ORDER BY time DESC LIMIT 1');
     return rows[0];
 }
 
@@ -63,7 +66,6 @@ function skewAndRound(point) {
 }
 
 
-/*
 function skew(point) {
     if (!point) {
         return { lat: 0, long: 0 };
@@ -73,7 +75,6 @@ function skew(point) {
 
     return { lat: ratio(lat) * lat, long };
 }
-*/
 
 
 async function coordinatesForDay(timestamp) {
@@ -96,8 +97,100 @@ async function coordinatesForDay(timestamp) {
 }
 
 
-async function getSquares(zoom, lat, long) {
-    const delta = 0.007 * zoom;
+async function getSquaresFromRawData(zoom, lat, long) {
+    const delta = 0.06 * zoom;
+
+    let prevLat, prevLong;
+    const lastLocation = await getLastLocation();
+
+    if (lat) {
+        [prevLat, prevLong] = [parseFloat(lat), parseFloat(long)];
+    } else {
+        [prevLat, prevLong] = [lastLocation.lat, lastLocation.long];
+    }
+
+    const rows = await db.all(`
+        SELECT lat, long, 1 as visits FROM Coordinates
+        WHERE (lat BETWEEN ? AND ?) AND (long BETWEEN ? AND ?)`,
+    prevLat - delta * 2,
+    prevLat + delta * 2,
+    prevLong - delta,
+    prevLong + delta
+    );
+
+    const aggregate = {};
+    rows.forEach(row => {
+        const agg = skew(row);
+        const key = agg.lat + ',' + agg.long;
+        if (aggregate[key]) {
+            aggregate[key].visits += 1;
+        } else {
+            aggregate[key] = { lat: agg.lat, long: agg.long, visits: 1 };
+        }
+    });
+
+    const squares = {};
+    const squareSize = 200;
+    Object.values(aggregate).forEach(row => calcSquareCoordinate(row, squareSize));
+
+    return {
+        squareSize,
+        squares:
+            Object
+                .keys(squares)
+                .map(key =>
+                    key.split(',').map(n => parseInt(n, 10)).concat(
+                        squares[key].map(arr => arr.reduce((a, n) => (a << 3) + compactVisits(n), 0))
+                    )
+                ),
+        lastLocation,
+        ratio: ratio(lastLocation.lat),
+    };
+
+    function compactVisits(visits) {
+        if (visits > 20) {
+            return 3;
+        }
+
+        if (visits > 5) {
+            return 2;
+        }
+
+        if (visits > 0) {
+            return 1;
+        }
+
+        return 0;
+    }
+
+    function calcSquareCoordinate({ lat, long, visits }, squareSize) {
+        const a0 = Math.floor(lat * squareSize);
+        const b0 = Math.floor(long * squareSize);
+        const a = Math.floor(lat * squareSize * 10);
+        const b = Math.floor(long * squareSize * 10);
+        const offsetA = a - a0 * 10;
+        const offsetB = b - b0 * 10;
+        const squareId = a0 + ',' + b0;
+        // console.log(lat, long, a, b, a0, b0, offsetA, offsetB);
+
+        if (!(squares[squareId])) {
+            squares[squareId] = (new Array(10)).fill(0).map(() => (new Array(10).fill(0)));
+        }
+
+        if (offsetA > 9) {
+            console.log('offsetA', offsetA, lat, long, a0, a,);
+        }
+
+        if (offsetB > 9) {
+            console.log('offsetB', offsetB, lat, long, b0, b);
+        }
+
+        squares[squareId][offsetB][offsetA] += visits;
+    }
+}
+
+async function getSquaresFromAggregate(zoom, lat, long) {
+    const delta = 0.006 * zoom;
 
     let prevLat, prevLong;
     const lastLocation = await getLastLocation();
@@ -109,7 +202,7 @@ async function getSquares(zoom, lat, long) {
     }
 
     const rows = await db.all(`
-        SELECT * FROM Squares
+        SELECT * FROM Squares3
         WHERE (lat BETWEEN ? AND ?) AND (long BETWEEN ? AND ?)`,
     prevLat - delta * 2,
     prevLat + delta * 2,
@@ -119,6 +212,7 @@ async function getSquares(zoom, lat, long) {
 
     const squares = {};
     rows.forEach(row => calcSquareCoordinate(row, 200));
+    // console.log(squares);
 
     return {
         squares:
@@ -141,12 +235,26 @@ async function getSquares(zoom, lat, long) {
         const offsetA = a - a0 * 10;
         const offsetB = b - b0 * 10;
         const squareId = a0 + ',' + b0;
+        // console.log(lat, long, a, b, a0, b0, offsetA, offsetB);
 
         if (!(squares[squareId])) {
-            squares[squareId] = (new Array(10)).fill(0).map(() => [0,0,0,0,0,0,0,0,0,0]);
+            squares[squareId] = (new Array(10)).fill(0).map(() => (new Array(10).fill(0)));
         }
 
-        squares[squareId][offsetB][offsetA] = visits;
+        let v;
+        if (visits > 20) {
+            v = 3;
+        } else if (visits > 5) {
+            v = 2;
+        } else {
+            v = 1;
+        }
+        try {
+            squares[squareId][offsetB][offsetA] = v;
+        } catch (e) {
+            // console.log('offsetB', offsetB);
+            throw e;
+        }
     }
 }
 

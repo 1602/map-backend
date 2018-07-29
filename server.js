@@ -81,7 +81,7 @@ server.get('/path', async (req, res) => {
 });
 
 server.get('/squares', async (req, res) => {
-    const squares = await app.getSquares(parseFloat(req.query.zoom));
+    const squares = await app.getSquaresFromRawData(parseFloat(req.query.zoom), req.query.lat, req.query.long);
     res.send(JSON.stringify(squares));
 });
 
